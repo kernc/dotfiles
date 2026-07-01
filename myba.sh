@@ -223,7 +223,14 @@ _decrypt_file () {
     _rm_tmp "$decrypted_tmpfile_plain"
     _decrypt "$_plain_path" <"$ENC_REPO/$_enc_path" >"$decrypted_tmpfile"
     abs_path="$WORK_TREE/$_plain_path"
-    mkdir -p "${abs_path%/*}"
+    # Create containing directory. If the file already exists and
+    # is not a directory, mkdir fails. In that case (what was previously a
+    # committed file is not a dir), remove the file and retry mkdir.
+    mkdir -p "${abs_path%/*}" ||
+        [ -e "${abs_path%/*}" ] &&
+        [ ! -d "${abs_path%/*}" ] &&
+        rm -rf "${abs_path%/*}" &&
+        mkdir -p "${abs_path%/*}"
     if _gzip_add_header <"$decrypted_tmpfile" | gzip -dc >"$decrypted_tmpfile_plain" 2>/dev/null; then
         cat "$decrypted_tmpfile_plain"
     else
@@ -325,7 +332,10 @@ cmd_clone () {
 
 cmd_decrypt () {
     # Convert the encrypted commit messages back to plain repo commits
-    if [ "$(_git_plain_nonbare ls-files)" ]; then
+	rev=HEAD; if _is_enc_commit "${1:-}"; then rev="$1^.."; fi
+	if _is_plain_commit "${1:-}"; then warn 'ERROR: Parameter FROM_REV should be a commit of the *encrypted* repo!'; exit 1; fi
+
+    if [ "$rev" = 'HEAD' ] && [ "$(_git_plain_nonbare ls-files)" ]; then
         if [ ! "${YES_OVERWRITE:-}" ]; then
             warn "WARNING: Plain repo in '$PLAIN_REPO' already restored (and possibly commited to). To overwrite, set \$YES_OVERWRITE=1."
             exit 1
@@ -364,8 +374,6 @@ cmd_decrypt () {
             exit 1
         fi
         quiet _trap_append "git_enc checkout --force '$cur_branch'" INT HUP TERM EXIT
-        rev=HEAD; if _is_enc_commit "${1:-}"; then rev="$1^.."; fi
-        if _is_plain_commit "${1:-}"; then warn 'ERROR: Parameter FROM_REV should be a commit of the *encrypted* repo!'; exit 1; fi
         git_enc rev-list --reverse "$rev" |
             while read _enc_commit; do
                 git_enc checkout --force "$_enc_commit"
@@ -379,6 +387,10 @@ cmd_decrypt () {
                 if [ "$plain_commit" ]; then
                     _parallelize 0 2 decrypt_one <"$PLAIN_REPO/manifest/$plain_commit"
                     cut -f2 "$PLAIN_REPO/manifest/$plain_commit" | git_add_files_from_stdin
+                elif git_enc show --name-status --pretty=format: "$_enc_commit" | grep -v '^D' | grep -q .; then
+					# A "Update myba.sh" commit
+                    warn "WARNING: Skipping encrypted commit $_enc_commit as none of its files are mentioned in any manifests."
+                    continue
                 else
                     # Delete-only commit
                     commit_files="$(git_enc show --name-only --pretty=format: "$_enc_commit" |
@@ -728,6 +740,7 @@ cmd_checkout() {
             _git_trace _git_enc_sparse_checkout_files
 
         _ask_pw
+        # TODO: print files being checked out
         _parallelize 0 2 _decrypt_file <"$working_manifest"
     fi
 }
